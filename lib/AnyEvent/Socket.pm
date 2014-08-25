@@ -725,6 +725,7 @@ my $serializer = Data::Serializer->new();
 
 sub resolve_sockaddr($$$$$$) {
    my ($node, $service, $proto, $family, $type, $cb) = @_;
+   $statsd->increment("resolve_sockaddr.total.calls." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 
    my $start_timer_total = Time::HiRes::time();
 
@@ -789,6 +790,7 @@ sub resolve_sockaddr($$$$$$) {
          $statsd->timing("resolve_sockaddr.total.call_parse_address." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          if (my $noden = parse_address $node) {
             my $af = address_family $noden;
+            $statsd->increment("resolve_sockaddr.total.parse_address_succeeded." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 
             if ($af == AF_INET && $family != 6) {
                push @res, [$idx, "ipv4", [AF_INET, $type, $proton,
@@ -800,6 +802,7 @@ sub resolve_sockaddr($$$$$$) {
                            pack_sockaddr $port, $noden]]
             }
          } else {
+            $statsd->increment("resolve_sockaddr.total.parse_address_failed." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
             $statsd->timing("resolve_sockaddr.total.parse_address_else." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
             $node =~ y/A-Z/a-z/;
 
