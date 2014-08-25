@@ -43,6 +43,13 @@ use AnyEvent (); BEGIN { AnyEvent::common_sense }
 use AnyEvent::Util qw(guard fh_nonblocking AF_INET6);
 use AnyEvent::DNS ();
 
+use Data::Dumper;
+use Etsy::StatsD;
+use POSIX;
+use Time::HiRes;
+
+my $statsd = Etsy::StatsD->new("127.0.0.1");
+
 use base 'Exporter';
 
 our @EXPORT = qw(
@@ -714,6 +721,8 @@ sub _load_hosts_unless(&$@) {
 sub resolve_sockaddr($$$$$$) {
    my ($node, $service, $proto, $family, $type, $cb) = @_;
 
+   my $start_timer_total = Time::HiRes::time();
+
    if ($node eq "unix/") {
       return $cb->() if $family || $service !~ /^\//; # no can do
 
@@ -750,6 +759,8 @@ sub resolve_sockaddr($$$$$$) {
               or Carp::croak "$service/$proto: service unknown";
    }
 
+   $statsd->timing("resolve_sockaddr.total.my_resolve." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+
    # resolve a records / provide sockaddr structures
    my $resolve = sub {
       my @target = @_;
@@ -770,6 +781,7 @@ sub resolve_sockaddr($$$$$$) {
       for my $idx (0 .. $#target) {
          my ($node, $port) = @{ $target[$idx] };
 
+         $statsd->timing("resolve_sockaddr.total.call_parse_address." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          if (my $noden = parse_address $node) {
             my $af = address_family $noden;
 
@@ -783,12 +795,14 @@ sub resolve_sockaddr($$$$$$) {
                            pack_sockaddr $port, $noden]]
             }
          } else {
+            $statsd->timing("resolve_sockaddr.total.parse_address_else." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
             $node =~ y/A-Z/a-z/;
 
             # a records
             if ($family != 6) {
                $cv->begin;
                AnyEvent::DNS::a $node, sub {
+                  $statsd->timing("resolve_sockaddr.total.aedns_a_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
                   push @res, [$idx, "ipv4", [AF_INET, $type, $proton, pack_sockaddr $port, parse_ipv4 $_]]
                      for @_;
 
@@ -847,6 +861,7 @@ sub resolve_sockaddr($$$$$$) {
          }
       };
    } else {
+      $statsd->timing("resolve_sockaddr.total.call_resolve." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
       # most common case
       $resolve->([$node, $port]);
    }
@@ -976,14 +991,18 @@ Example: connect to a UNIX domain socket.
 
 sub tcp_connect($$$;$) {
    my ($host, $port, $connect, $prepare) = @_;
+   my $start_timer_total = Time::HiRes::time();
 
    # see http://cr.yp.to/docs/connect.html for some tricky aspects
    # also http://advogato.org/article/672.html
 
    my %state = ( fh => undef );
 
+   $statsd->timing("tcp_connect.total.resolve_sockaddr_call." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+
    # name/service to type/sockaddr resolution
    resolve_sockaddr $host, $port, 0, 0, undef, sub {
+      $statsd->timing("tcp_connect.total.resolve_sockaddr_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
       my @target = @_;
 
       $state{next} = sub {
@@ -1062,6 +1081,8 @@ sub tcp_connect($$$;$) {
             $state{next}();
          }
       };
+
+      $statsd->timing("tcp_connect.total.resolve_sockaddr_end." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 
       $! = Errno::ENXIO;
       $state{next}();
