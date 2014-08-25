@@ -50,6 +50,8 @@ use Time::HiRes;
 
 my $statsd = Etsy::StatsD->new("127.0.0.1");
 
+use Data::Serializer;
+
 use base 'Exporter';
 
 our @EXPORT = qw(
@@ -718,6 +720,9 @@ sub _load_hosts_unless(&$@) {
    }
 }
 
+my %cache = ();
+my $serializer = Data::Serializer->new();
+
 sub resolve_sockaddr($$$$$$) {
    my ($node, $service, $proto, $family, $type, $cb) = @_;
 
@@ -801,10 +806,13 @@ sub resolve_sockaddr($$$$$$) {
             # a records
             if ($family != 6) {
                $cv->begin;
-               AnyEvent::DNS::a $node, sub {
-                  $statsd->timing("resolve_sockaddr.total.aedns_a_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+               my $cache_size = keys %cache;
+               $statsd->gauge("resolve_sockaddr.total.cache_size." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, $cache_size) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+               if( exists $cache{ $node } ) {
+                  $statsd->increment("resolve_sockaddr.total.cache_hit." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+                  my $deserialized = $serializer->deserialize($cache{ $node });
                   push @res, [$idx, "ipv4", [AF_INET, $type, $proton, pack_sockaddr $port, parse_ipv4 $_]]
-                     for @_;
+                        for @$deserialized;
 
                   # dns takes precedence over hosts
                   _load_hosts_unless {
@@ -812,7 +820,22 @@ sub resolve_sockaddr($$$$$$) {
                         map [$idx, "ipv4", [AF_INET, $type, $proton, pack_sockaddr $port, $_]],
                            @{ ($HOSTS{$node} || [])->[0] };
                   } $cv, @_;
-               };
+               } else {
+                  $statsd->increment("resolve_sockaddr.total.cache_miss." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+                  AnyEvent::DNS::a $node, sub {
+                     $statsd->timing("resolve_sockaddr.total.aedns_a_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+                     $cache{ $node } = $serializer->serialize(\@_);
+                     push @res, [$idx, "ipv4", [AF_INET, $type, $proton, pack_sockaddr $port, parse_ipv4 $_]]
+                        for @_;
+
+                     # dns takes precedence over hosts
+                     _load_hosts_unless {
+                        push @res,
+                           map [$idx, "ipv4", [AF_INET, $type, $proton, pack_sockaddr $port, $_]],
+                              @{ ($HOSTS{$node} || [])->[0] };
+                     } $cv, @_;
+                  };
+               }
             }
 
             # aaaa records
