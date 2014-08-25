@@ -34,6 +34,14 @@ use Socket qw(AF_INET SOCK_DGRAM SOCK_STREAM);
 use AnyEvent (); BEGIN { AnyEvent::common_sense }
 use AnyEvent::Util qw(AF_INET6);
 
+use Data::Dumper;
+use Etsy::StatsD;
+use POSIX;
+use Time::HiRes;
+use Data::Serializer;
+
+my $statsd = Etsy::StatsD->new("127.0.0.1");
+
 our $VERSION = $AnyEvent::VERSION;
 our @DNS_FALLBACK; # some public dns servers as fallback
 
@@ -156,7 +164,10 @@ sub resolver ();
 sub a($$) {
    my ($domain, $cb) = @_;
 
+   my $start_timer_total = Time::HiRes::time();
+
    resolver->resolve ($domain => "a", sub {
+      $statsd->timing("ae_dns.total.resolve_sub." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
       $cb->(map $_->[4], @_);
    });
 }
@@ -1130,11 +1141,14 @@ sub _free_id {
 # execute a single request, involves sending it with timeouts to multiple servers
 sub _exec {
    my ($self, $req) = @_;
+   my $start_timer_total = Time::HiRes::time();
 
    my $retry; # of retries
    my $do_retry;
 
    $do_retry = sub {
+      $statsd->increment("ae_dns.total.exec.do_retry." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+      $statsd->timing("ae_dns.total.exec.do_retry_sub." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
       my $retry_cfg = $self->{retry}[$retry++]
          or do {
             # failure
@@ -1145,11 +1159,15 @@ sub _exec {
       my ($server, $timeout) = @$retry_cfg;
       
       $self->{id}{$req->[2]} = [(AE::timer $timeout, 0, sub {
+         $statsd->timing("ae_dns.total.exec.timeout." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+         $statsd->increment("ae_dns.total.exec.timeout." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          $NOW = time;
 
          # timeout, try next
          &$do_retry if $do_retry;
       }), sub {
+         $statsd->timing("ae_dns.total.exec.success." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+         $statsd->increment("ae_dns.total.exec.success." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          my ($res) = @_;
 
          if ($res->{tc}) {
@@ -1203,6 +1221,7 @@ sub _exec {
 
 sub _scheduler {
    my ($self) = @_;
+   my $start_timer_total = Time::HiRes::time();
 
    return if $self->{inhibit};
 
@@ -1214,9 +1233,16 @@ sub _scheduler {
    delete $self->{id}{ (shift @{ $self->{reuse_q} })->[1] }
       while @{ $self->{reuse_q} } && $self->{reuse_q}[0][0] <= $NOW;
 
+   $statsd->gauge("ae_dns.total.max_outstanding." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, $self->{max_outstanding}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+   $statsd->gauge("ae_dns.total.outstanding." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, $self->{outstanding}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+   $statsd->gauge("ae_dns.total.queue_size." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, scalar @{ $self->{queue} }) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+   $statsd->gauge("ae_dns.total.wait_size." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, scalar @{ $self->{wait} }) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+
    while ($self->{outstanding} < $self->{max_outstanding}) {
+      $statsd->increment("ae_dns.total.scheduler.while_calls." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 
       if (@{ $self->{reuse_q} } >= 30000) {
+         $statsd->increment("ae_dns.total.scheduler.more_than_30000." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          # we ran out of ID's, wait a bit
          $self->{reuse_to} ||= AE::timer $self->{reuse_q}[0][0] - $NOW, 0, sub {
             delete $self->{reuse_to};
@@ -1226,6 +1252,7 @@ sub _scheduler {
       }
 
       if (my $req = shift @{ $self->{queue} }) {
+         $statsd->increment("ae_dns.total.scheduler.req_in_the_queue." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          # found a request in the queue, execute it
          while () {
             $req->[2] = int rand 65536;
@@ -1239,14 +1266,17 @@ sub _scheduler {
          $self->_exec ($req);
 
       } elsif (my $cb = shift @{ $self->{wait} }) {
+         $statsd->increment("ae_dns.total.scheduler.wfs_callback." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          # found a wait_for_slot callback
          $cb->($self);
 
       } else {
+         $statsd->increment("ae_dns.total.scheduler.nothing." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          # nothing to do, just exit
          last;
       }
    }
+   $statsd->timing("ae_dns.total.scheduler.end." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 }
 
 =item $resolver->request ($req, $cb->($res))
@@ -1267,6 +1297,7 @@ received, or no arguments in case none of the servers answered.
 
 sub request($$) {
    my ($self, $req, $cb) = @_;
+   my $start_timer_total = Time::HiRes::time();
 
    # _enc_name barfs on names that are too long, which is often outside
    # program control, so check for too long names here.
@@ -1275,6 +1306,7 @@ sub request($$) {
          if 255 < length $_->[0];
    }
 
+   $statsd->increment("ae_dns.total.push_queue." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
    push @{ $self->{queue} }, [dns_pack $req, $cb];
    $self->_scheduler;
 }
@@ -1382,11 +1414,16 @@ Examples:
 
 =cut
 
+my %cache = ();
+my $serializer = Data::Serializer->new();
+
 sub resolve($%) {
    my $cb = pop;
    my ($self, $qname, $qtype, %opt) = @_;
+   my $start_timer_total = Time::HiRes::time();
 
    $self->wait_for_slot (sub {
+      $statsd->timing("ae_dns.total.resolve.wait_for_slot_sub." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
       my $self = shift;
 
       my @search = $qname =~ s/\.$//
@@ -1407,6 +1444,7 @@ sub resolve($%) {
       my ($do_search, $do_req);
       
       $do_search = sub {
+         $statsd->timing("ae_dns.total.resolve.do_search_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
          @search
             or (undef $do_search), (undef $do_req), return $cb->();
 
@@ -1415,10 +1453,12 @@ sub resolve($%) {
 
          # advance in cname-chain
          $do_req = sub {
+            $statsd->timing("ae_dns.total.resolve.do_req_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
             $self->request ({
                rd => 1,
                qd => [[$name, $qtype, $class]],
             }, sub {
+               $statsd->timing("ae_dns.total.resolve.request_sub_start." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
                my ($res) = @_
                   or return $do_search->();
 
@@ -1428,8 +1468,11 @@ sub resolve($%) {
                   # results found?
                   my @rr = grep $name eq lc $_->[0] && ($atype{"*"} || $atype{$_->[1]}), @{ $res->{an} };
 
-                  (undef $do_search), (undef $do_req), return $cb->(@rr)
-                     if @rr;
+                  if( @rr ) {
+                     $statsd->timing("ae_dns.total.resolve.return_cb_rr." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+                     $cache{ $name . "_" . $qtype . "_" . $class } = $serializer->serialize(\@rr);
+                     (undef $do_search), (undef $do_req), return $cb->(@rr);
+                  }
 
                   # see if there is a cname we can follow
                   my @rr = grep $name eq lc $_->[0] && $_->[1] eq "cname", @{ $res->{an} };
@@ -1453,7 +1496,15 @@ sub resolve($%) {
             });
          };
 
-         $do_req->();
+         if( exists $cache{ $name . "_" . $qtype . "_" . $class } ) {
+            $statsd->increment("ae_dns.total.resolve.cache_hit." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+            my $deserialized = $serializer->deserialize($cache{ $name . "_" . $qtype . "_" . $class });
+#            print STDERR "Dump: " . Dumper($deserialized) . "\n";
+            (undef $do_search), (undef $do_req), return $cb->(@$deserialized);
+#            $do_req->();
+         } else {
+            $do_req->();
+         }
       };
 
       $do_search->();
@@ -1485,10 +1536,14 @@ full at all times.
 =cut
 
 sub wait_for_slot {
+   my $start_timer_total = Time::HiRes::time();
    my ($self, $cb) = @_;
 
+   $statsd->increment("ae_dns.total.push_wait." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
    push @{ $self->{wait} }, $cb;
+   $statsd->timing("ae_dns.total.call_scheduler." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
    $self->_scheduler;
+   $statsd->timing("ae_dns.total.end_scheduler." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
 }
 
 use AnyEvent::Socket (); # circular dependency, so do not import anything and do it at the end
