@@ -527,11 +527,6 @@ sub _reset {
             local $TRACE_CUR = $w;
 
             $TRACE_LOGGER->("enter $w") if $TRACE_ENABLED && $t;
-            if ($start_timer_total != 0) {
-               $statsd->timing("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
-               $statsd->increment("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
-            }
-            $start_timer_total = Time::HiRes::time();
             eval {
                local $SIG{__DIE__} = sub {
                   die $_[0] . AnyEvent::Debug::backtrace
@@ -539,6 +534,16 @@ sub _reset {
                };
                &$cb;
             };
+            if ($start_timer_total != 0) {
+               if( ceil((Time::HiRes::time() - $start_timer_total)*1000) > 300 ) {
+                  print STDERR "More than 300 msecs\n";
+                  $Data::Dumper::Deparse = 1;
+                  print STDERR "cb: " . Dumper($cb) . "\n";
+               }
+               $statsd->timing("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+               $statsd->increment("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+            }
+            $start_timer_total = Time::HiRes::time();
             if ($@) {
                my $err = "$@";
                push @{ $w->{error} }, [AE::now, $err]
