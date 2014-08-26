@@ -492,6 +492,14 @@ use AnyEvent (); BEGIN { AnyEvent::common_sense }
 use Scalar::Util ();
 use Carp ();
 
+use Data::Dumper;
+use Etsy::StatsD;
+use POSIX;
+use Time::HiRes;
+
+my $statsd = Etsy::StatsD->new("127.0.0.1");
+my $start_timer_total = 0;
+
 sub _reset {
    for my $name (qw(io timer signal child idle)) {
       my $super = "SUPER::$name";
@@ -519,6 +527,11 @@ sub _reset {
             local $TRACE_CUR = $w;
 
             $TRACE_LOGGER->("enter $w") if $TRACE_ENABLED && $t;
+            if ($start_timer_total != 0) {
+               $statsd->timing("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}, ceil((Time::HiRes::time() - $start_timer_total)*1000)) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+               $statsd->increment("ae.total.debug_wrap." . $ENV{'PERL_MEM_STATSD_POSTFIX'}) if defined $ENV{'PERL_MEM_STATSD_POSTFIX'};
+            }
+            $start_timer_total = Time::HiRes::time();
             eval {
                local $SIG{__DIE__} = sub {
                   die $_[0] . AnyEvent::Debug::backtrace
